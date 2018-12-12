@@ -1,0 +1,164 @@
+---
+title: "Prediction Assignment Writeup"
+author: "Andre Luna"
+date: "December 12, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(cache = TRUE)
+```
+```{r}
+#Reading data
+training <- read.table("C://Users//Consultor//Desktop//course_project//pml-training.csv", sep = ",", header = T, na.strings = c("", "NA", "#DIV/0!"))
+testing <- read.table("C://Users//Consultor//Desktop//course_project//pml-testing.csv", sep = ",", header = T, na.strings = c("", "NA", "#DIV/0!")) 
+```
+
+## Executive Summary
+Using data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants the study captured several dimensions of a barbell lift exercise, conducted both correctly and incorrectly in 5 different ways. Base on the gathered data, this study proposed to predict if a given exercise was conducted correcly or not, classifying it in the 5 ways. As the features were highly correlated, the data was processed using a PCA analysis. Two models were trained and validated - a Random Forest and a Support Vector Machine, both yielding excellent results on predicting the correct outcome.
+
+The original study and data can be found [here](http://groupware.les.inf.puc-rio.br/har).
+
+
+## Pre-processing and Exploring Data
+```{r, results = "hold"}
+#Libraries
+library(tidyverse)
+library(caret)
+
+
+#splitting training data into train and validation
+partition <- createDataPartition(training$classe, p=0.7, list=FALSE)
+training <- training[partition, ]
+validation <- training[-partition, ]
+
+#Examining data
+dim(training)
+dim(validation)
+dim(testing)
+```
+  
+With the partioned data, it is necessary to examine the presence and structure of missing data before conducting any further transformation or analysis
+
+### Analysing Missing Data
+```{r, results = FALSE}
+  #function to identify missings
+pMiss <- function(x){sum(is.na(x))/length(x)*100}
+
+apply(training, 2, pMiss) #detecting proportion of missings in columns
+```
+  
+After creating a function to detect the proprtion of missing information on features or lines, we can see that several columns have more than 95% of missing values. As the proportion of missing values is persistent across variables, the ocurrence might not be random. Still, the decided course of action was to eliminate such features.
+  
+  
+```{r, results = "hold"}
+#Removing missing-filled columns 
+train_clean <- training[, -which(colMeans(is.na(training)) > 0.5)]
+validate_clean <- validation[, -which(colMeans(is.na(validation)) > 0.5)]
+test_clean <- testing[, -which(colMeans(is.na(testing)) > 0.5)]
+
+dim(train_clean)
+dim(validate_clean)
+dim(test_clean)
+```
+
+Once the missing data are delt with, it is necessary to explore the correlation between features, as multicolinearity of variables might introduce bias to the models
+  
+### Correlation Analysis
+It is first necessary to collect only the numeric variables in the data to comput the correlation matrix. In order to help visualization, we will investigate only the variables with correlation above 0.7.
+
+```{r}
+#Selecting numeric variables
+train_num <- dplyr::select_if(train_clean[,-1], is.numeric)
+#removing index variable X
+  # calculate correlation matrix
+  correlationMatrix <- cor(train_num, use = "complete.obs") 
+
+  # find attributes that are highly corrected (>0.7)
+  highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.7)
+  # print indexes of highly correlated attributes
+  investigate_corr <- cor(train_num[, highlyCorrelated])
+
+  #Plotting correlation matrix
+library(corrplot)
+corrplot(investigate_corr, method = "pie", order = "FPC")
+```
+  
+  It is not unexpected to see that a great number of variables is correlated with each other, especially the ones that capture different axis of the same movement. If they were in lesser numbers, an alternative would be to not include them in the model. As they are numerous, a better approach is to conduct a PCA analysis, extracting the most relevant part of the information. This action will sacrifice explanatory power of the model, which is no problem as the focus is on predicting correctly the exercise.
+  
+### PCA Analysis 
+```{r}
+pca_train <- prcomp(train_num, center = T, scale. = T)
+
+#compute standard deviation of each principal component
+ std_dev <- pca_train$sdev
+
+#compute variance
+ pr_var <- std_dev^2
+ 
+ prop_varex <- pr_var/sum(pr_var)
+
+#scree plot
+ plot(prop_varex, xlab = "Principal Component",
+       ylab = "Proportion of Variance Explained",
+       type = "b")
+
+ sum(prop_varex[1:30])
+```
+  
+  As we can see, by using 30 Principal Component vectors, I can assure 97% of variance explanation, readucing the amount of dimensions from 160 features to only 30. Now that the data is pre-processed it is time for modelling.
+  
+## Modelling
+### Model Prep
+As we are dealing with PCA vectors, it is necessary to generate similar vectors on validating and testing data with te same specifications as generated in the train data.
+
+```{r}
+#Capturing 30 PC vectors and the response variable
+final_train <- data.frame(classe = train_clean$classe, pca_train$x[,1:30])
+
+#Generating PCA on validation and test data
+validate_num <- dplyr::select_if(validate_clean[,-1], is.numeric)
+final_validate <- predict(pca_train, newdata = validate_num) 
+final_validate <- as.data.frame(final_validate[, 1:30])
+ 
+test_num <- dplyr::select_if(test_clean[,-c(1, 60)], is.numeric)
+final_test <- predict(pca_train, newdata = test_num) 
+final_test <- as.data.frame(final_test[, 1:30])
+```
+  
+  To reduce variance of the prediction, the models are to be trained with k-fold cross-validation, retraining the model on 5 cuts from the training data, 3 folds.
+  
+```{r}
+ control <- trainControl(method="repeatedcv", number=5, repeats=3, search="random")
+```
+  
+### Creating and Testing Models
+```{r, cache = T}
+#For reproducibility
+ set.seed(123)
+
+ #Random Forest
+rf_fit1 <- train(classe ~ ., data = final_train, method = "rf", trControl =control)
+rf_valid <- predict(rf_fit1, newdata = final_validate)
+
+confusionMatrix(validate_clean$classe, rf_valid)
+
+  #SVM
+library(e1071)
+svm_fit1 <- svm(classe ~ ., data = final_train)
+svm_valid <- predict(svm_fit1, newdata = final_validate)
+
+
+confusionMatrix(validate_clean$classe, svm_valid)
+```
+
+Due to the nearly perfect performance of the Random Forest model, this was the chosen model to predict the 20 cases in testing data:
+
+```{r}
+rf_pred <- predict(rf_fit1, newdata = final_test)
+
+plot(rf_pred)
+```
